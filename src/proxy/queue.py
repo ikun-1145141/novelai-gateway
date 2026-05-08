@@ -1,0 +1,88 @@
+"""
+全局并发门控。
+
+通过异步信号量和互斥锁确保同一时间只有一个重负载请求通过，
+避免触发 NovelAI 的并发限制（429）。
+"""
+
+import asyncio
+import logging
+import random
+import time
+
+from .config import settings
+
+logger = logging.getLogger("gateway")
+
+
+class ConcurrencyGate:
+    """
+    async with gate:
+        await do_heavy_work()
+    """
+
+    def __init__(self, max_concurrent: int, timeout: int,
+                 cooldown_min: float, cooldown_max: float):
+        self._sem = asyncio.Semaphore(max_concurrent)
+        self._lock = asyncio.Lock()  # 保护内部状态的锁
+        self._timeout = timeout
+        self._cooldown_min = cooldown_min
+        self._cooldown_max = cooldown_max
+        self._waiting = 0  # 当前排队等待的请求数
+        self._last_release_time = 0.0  # 上次释放锁的时间
+
+    async def __aenter__(self):
+        async with self._lock:
+            self._waiting += 1
+            waiting_count = self._waiting
+        
+        logger.info(f"⏳ 排队中... (当前等待: {waiting_count})")
+        
+        try:
+            await asyncio.wait_for(self._sem.acquire(), timeout=self._timeout)
+        except asyncio.TimeoutError:
+            async with self._lock:
+                self._waiting -= 1
+                remaining = self._waiting
+            logger.warning(f"⚠️ 排队超时 (剩余等待: {remaining})")
+            raise
+        
+        async with self._lock:
+            self._waiting -= 1
+            remaining = self._waiting
+        
+        logger.info(f"🔒 获取锁，开始处理 (剩余等待: {remaining})")
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        # 请求完成后冷却，然后原子性地检查时间间隔并释放锁
+        if self._cooldown_max > 0:
+            delay = random.uniform(self._cooldown_min, self._cooldown_max)
+            logger.info(f"❄️ 冷却 {delay:.1f}s")
+            await asyncio.sleep(delay)
+        
+        # 原子性地检查时间间隔、更新时间戳、释放信号量
+        async with self._lock:
+            # 确保距离上次释放至少间隔冷却时间
+            if self._last_release_time > 0:
+                elapsed = time.time() - self._last_release_time
+                if elapsed < self._cooldown_min:
+                    extra_wait = self._cooldown_min - elapsed
+                    logger.info(f"⏱️ 额外保护等待 {extra_wait:.1f}s")
+                    await asyncio.sleep(extra_wait)
+            
+            # 更新时间戳并释放信号量（在锁保护下）
+            self._last_release_time = time.time()
+            self._sem.release()
+            waiting_count = self._waiting
+        
+        logger.info(f"🔓 释放锁 (当前等待: {waiting_count})")
+        return False
+
+
+gate = ConcurrencyGate(
+    max_concurrent=settings.max_concurrent,
+    timeout=settings.queue_timeout,
+    cooldown_min=settings.cooldown_min,
+    cooldown_max=settings.cooldown_max,
+)
