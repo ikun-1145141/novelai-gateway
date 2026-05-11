@@ -15,6 +15,9 @@ class Settings(BaseSettings):
     image_dir: Path = Path("images")
     image_base_url: str = ""
 
+    # Cloudflare Tunnel 配置
+    cloudflare_tunnel_token: str = ""  # 如果填写，启动时会自动尝试开启 cloudflared 隧道
+
     # NovelAI 上游地址
     novelai_base_url: str = "https://novelai.net"
     novelai_api_url: str = "https://api.novelai.net"

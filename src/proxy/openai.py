@@ -36,14 +36,14 @@ async def handle_openai_generations(request: Request) -> Response:
         body = await request.json()
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON body")
-    
+
     openai_model = body.get("model", "nai-diffusion-4-5-curated")
     prompt = body.get("prompt", "")
     size = body.get("size", "1024x1024")
     response_format = body.get("response_format", "url") # 默认 URL，但我们可能得回退到 b64
-    
+
     width, height = parse_size(size, 1024, 1024)
-    
+
     # 2. 构建 NAI Payload (参考 novel-api-go)
     # 这里简单实现一个 V4 的转换
     nai_payload = {
@@ -176,8 +176,8 @@ async def handle_openai_chat_completions(request: Request) -> Response:
 
     # 提示词指导（scale），范围 1.0–10.0，默认 5.0
     scale = min(max(float(body.get("scale", 5.0)), 1.0), 10.0)
-    # 缩放比例（cfg_rescale），范围 0.0–1.0，默认 0.6
-    cfg_rescale = min(max(float(body.get("cfg_rescale", 0.6)), 0.0), 1.0)
+    # 缩放比例（cfg_rescale），范围 0.0–1.0，默认 0.7
+    cfg_rescale = min(max(float(body.get("cfg_rescale", 0.7)), 0.0), 1.0)
     # 步数固定 28
     steps = 28
 
@@ -258,7 +258,7 @@ async def handle_openai_chat_completions(request: Request) -> Response:
             "height": height,
             "scale": scale,
             "steps": steps,
-            "sampler": "k_euler",
+            "sampler": "k_euler_ancestral",
             "seed": int(time.time() * 1000) % 1000000000,
             "n_samples": 1,
             "ucPreset": 0,

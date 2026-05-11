@@ -6,6 +6,8 @@ NovelAI 透明反向代理网关 — 路由层。
 
 import asyncio
 import logging
+import subprocess
+import os
 
 from fastapi import FastAPI, Request, Response, HTTPException
 from fastapi.responses import FileResponse
@@ -33,6 +35,19 @@ _DROP_HEADERS = frozenset({
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     settings.image_dir.mkdir(parents=True, exist_ok=True)
+
+    # 自动启动 Cloudflare Tunnel
+    if settings.cloudflare_tunnel_token:
+        logger.info("☁️ 正在启动 Cloudflare Tunnel...")
+        try:
+            # 使用 subprocess.Popen 异步启动，不阻塞主进程
+            # shell=True 在 Windows 上比较稳妥
+            cmd = f"cloudflared.exe tunnel run --token {settings.cloudflare_tunnel_token}"
+            subprocess.Popen(cmd, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            logger.info("✅ Cloudflare Tunnel 已在后台启动")
+        except Exception as e:
+            logger.error(f"❌ 启动 Cloudflare Tunnel 失败: {e}")
+
     logger.info(f"🚀 网关已启动  http://{settings.host}:{settings.port}")
     yield
     await close_client()
