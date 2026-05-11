@@ -231,13 +231,18 @@ def _parse_chat_messages(messages: list[dict], body: dict) -> dict[str, Any]:
     从 Chat 消息中解析生成参数。
 
     返回包含 prompt、negative_prompt、width、height、steps、character_prompts 的字典。
+
+    注意：步数固定 28，不允许用户覆盖（防止额外消耗 Anlas）。
+    画幅允许在三种官方尺寸中选择（均为小图）。
     """
     prompt = ""
     negative_prompt = DEFAULT_NEGATIVE_PROMPT
     character_prompts: list[dict] = []
+
+    # 步数固定，不接受用户修改
     steps = 28
 
-    # 从 body 顶层读取画幅（可被消息内容覆盖）
+    # 画幅允许用户在三种官方尺寸中选择（均 ≤ 1M 像素，都是小图）
     width = int(body.get("width", 832))
     height = int(body.get("height", 1216))
     if (width, height) not in VALID_SIZES:
@@ -259,8 +264,7 @@ def _parse_chat_messages(messages: list[dict], body: dict) -> dict[str, Any]:
                         w, h = int(parsed["size"][0]), int(parsed["size"][1])
                         if (w, h) in VALID_SIZES:
                             width, height = w, h
-                    if "steps" in parsed:
-                        steps = int(parsed["steps"])
+                    # steps 不允许用户覆盖
                 else:
                     prompt = content
             except (json.JSONDecodeError, ValueError):
@@ -292,7 +296,8 @@ def _parse_chat_messages(messages: list[dict], body: dict) -> dict[str, Any]:
     }
 
 
-def _build_chat_nai_payload(model: str, params: dict, scale: float, cfg_rescale: float) -> dict[str, Any]:
+def _build_chat_nai_payload(model: str, params: dict, scale: float, cfg_rescale: float,
+                            sampler: str = "k_euler_ancestral", noise_schedule: str = "karras") -> dict[str, Any]:
     """根据解析后的参数构建完整的 NAI 请求体。"""
     prompt = params["prompt"]
     negative_prompt = params["negative_prompt"]
@@ -323,7 +328,7 @@ def _build_chat_nai_payload(model: str, params: dict, scale: float, cfg_rescale:
             "height": params["height"],
             "scale": scale,
             "steps": params["steps"],
-            "sampler": "k_euler_ancestral",
+            "sampler": sampler,
             "seed": int(time.time() * 1000) % 1000000000,
             "n_samples": 1,
             "ucPreset": 0,
@@ -331,7 +336,7 @@ def _build_chat_nai_payload(model: str, params: dict, scale: float, cfg_rescale:
             "sm": False,
             "sm_dyn": False,
             "autoSmea": False,
-            "noise_schedule": "karras",
+            "noise_schedule": noise_schedule,
             "params_version": 3,
             "cfg_rescale": cfg_rescale,
             "legacy": False,
@@ -373,16 +378,18 @@ async def handle_openai_chat_completions(request: Request) -> Response:
     model = body.get("model", "nai-diffusion-4-5-curated")
     stream = body.get("stream", False)
 
-    # 解析生成参数
+    # 用户可控参数（有默认值）
     scale = min(max(float(body.get("scale", 5.0)), 1.0), 10.0)
     cfg_rescale = min(max(float(body.get("cfg_rescale", 0.7)), 0.0), 1.0)
+    sampler = body.get("sampler", "k_euler_ancestral")
+    noise_schedule = body.get("noise_schedule", "karras")
 
     params = _parse_chat_messages(messages, body)
     if not params["prompt"]:
         raise HTTPException(status_code=400, detail="No prompt found in messages")
 
     # 构建 NAI 请求
-    nai_payload = _build_chat_nai_payload(model, params, scale, cfg_rescale)
+    nai_payload = _build_chat_nai_payload(model, params, scale, cfg_rescale, sampler, noise_schedule)
 
     # 排队 → 发送 → 释放
     try:
