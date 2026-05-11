@@ -23,27 +23,47 @@ _stats_lock = Lock()
 
 def _get_png_size(data: bytes) -> tuple[int, int]:
     """从 PNG 二进制数据中解析宽高"""
-    if len(data) < 24: return 0, 0
+    if len(data) < 24:
+        return 0, 0
     if data.startswith(b'\x89PNG\r\n\x1a\n'):
         w, h = struct.unpack('>II', data[16:24])
         return w, h
     return 0, 0
 
+
+def _find_png_size(data: bytes) -> tuple[int, int]:
+    """在任意二进制内容中扫描 PNG 头并解析宽高。"""
+    signature = b'\x89PNG\r\n\x1a\n'
+    start = data.find(signature)
+    if start < 0:
+        return 0, 0
+    return _get_png_size(data[start:])
+
 def _get_size_from_any(content: bytes) -> tuple[int, int]:
-    """尝试从响应内容（可能是 ZIP 或 PNG）中检测宽高"""
-    if not content: return 0, 0
-    # 1. 尝试当作 PNG 解析
+    """尝试从响应内容（可能是 ZIP、PNG 或含 PNG 的二进制流）中检测宽高"""
+    if not content:
+        return 0, 0
+
+    # 1. 尝试当作裸 PNG 解析
     w, h = _get_png_size(content)
-    if w > 0: return w, h
-    # 2. 尝试当作 ZIP 解析
+    if w > 0:
+        return w, h
+
+    # 2. 尝试当作 ZIP 解析；NovelAI 常返回 application/zip
     try:
         with zipfile.ZipFile(io.BytesIO(content)) as zf:
             for name in zf.namelist():
-                if name.endswith(".png"):
-                    return _get_png_size(zf.read(name))
-    except:
+                if name.lower().endswith(".png"):
+                    w, h = _get_png_size(zf.read(name))
+                    if w > 0:
+                        return w, h
+    except zipfile.BadZipFile:
         pass
-    return 0, 0
+    except Exception:
+        pass
+
+    # 3. 最后兜底：直接在整个响应里扫描 PNG 签名
+    return _find_png_size(content)
 
 def record_generation(content: bytes, path: str, width: int = 0, height: int = 0):
     """记录生成统计：根据画幅判断，超过 1024x1024 (1,048,576 像素) 为大图"""
@@ -51,7 +71,9 @@ def record_generation(content: bytes, path: str, width: int = 0, height: int = 0
     if "/ai/generate-image" not in path:
         return
 
-    # 如果没传宽高，尝试从内容中检测
+    # 优先使用调用方传入的请求画幅；如果没传宽高，再从响应内容中检测
+    width = int(width or 0)
+    height = int(height or 0)
     if width <= 0 or height <= 0:
         width, height = _get_size_from_any(content)
 
