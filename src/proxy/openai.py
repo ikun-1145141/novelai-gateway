@@ -200,7 +200,24 @@ async def handle_openai_chat_completions(request: Request) -> Response:
         content = msg.get("content", "")
 
         if role == "user":
-            prompt = content
+            # content 可能是 JSON 字符串（如 {"prompt": "...", "negative_prompt": "...", "size": [...], "steps": ...}）
+            try:
+                parsed = json.loads(content)
+                if isinstance(parsed, dict):
+                    if "prompt" in parsed:
+                        prompt = parsed["prompt"]
+                    if "negative_prompt" in parsed:
+                        negative_prompt = parsed["negative_prompt"]
+                    if "size" in parsed and isinstance(parsed["size"], list) and len(parsed["size"]) == 2:
+                        w, h = int(parsed["size"][0]), int(parsed["size"][1])
+                        if (w, h) in _VALID_SIZES:
+                            width, height = w, h
+                    if "steps" in parsed:
+                        steps = int(parsed["steps"])
+                else:
+                    prompt = content
+            except (json.JSONDecodeError, ValueError):
+                prompt = content
         elif role == "system":
             if "Negative prompt:" in content:
                 negative_prompt = content.replace("Negative prompt:", "").strip()
