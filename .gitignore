@@ -10,6 +10,7 @@ images/*.png
 images/*.jpg
 images/*.jpeg
 logs/*.log
+logs/*.json
 .claude/
 .vscode/
 .idea/

@@ -6,8 +6,8 @@ NovelAI 透明反向代理网关 — 路由层。
 
 import asyncio
 import logging
+import platform
 import subprocess
-import os
 
 from fastapi import FastAPI, Request, Response, HTTPException
 from fastapi.responses import FileResponse
@@ -21,12 +21,12 @@ from .openai import handle_openai_generations, handle_openai_chat_completions, h
 
 logger = logging.getLogger("gateway")
 
-# 不应透传给客户端的响应头
+# 不应透传给客户端的响应头（重负载请求专用，比 forwarder 多去掉 content-disposition）
 _DROP_HEADERS = frozenset({
     "content-encoding", "transfer-encoding", "connection",
     "content-security-policy", "content-security-policy-report-only",
     "strict-transport-security", "x-frame-options",
-    "content-disposition",  # 强制去掉，防止触发下载拦截
+    "content-disposition",
 })
 
 
@@ -36,17 +36,9 @@ _DROP_HEADERS = frozenset({
 async def lifespan(_app: FastAPI):
     settings.image_dir.mkdir(parents=True, exist_ok=True)
 
-    # 自动启动 Cloudflare Tunnel
+    # 自动启动 Cloudflare Tunnel（可选）
     if settings.cloudflare_tunnel_token:
-        logger.info("☁️ 正在启动 Cloudflare Tunnel...")
-        try:
-            # 使用 subprocess.Popen 异步启动，不阻塞主进程
-            # shell=True 在 Windows 上比较稳妥
-            cmd = f"cloudflared.exe tunnel run --token {settings.cloudflare_tunnel_token}"
-            subprocess.Popen(cmd, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            logger.info("✅ Cloudflare Tunnel 已在后台启动")
-        except Exception as e:
-            logger.error(f"❌ 启动 Cloudflare Tunnel 失败: {e}")
+        _start_cloudflare_tunnel()
 
     logger.info(f"🚀 网关已启动  http://{settings.host}:{settings.port}")
     yield
@@ -54,11 +46,26 @@ async def lifespan(_app: FastAPI):
     logger.info("🛑 网关已关闭")
 
 
+def _start_cloudflare_tunnel():
+    """在后台启动 cloudflared 隧道进程。"""
+    logger.info("☁️ 正在启动 Cloudflare Tunnel...")
+    try:
+        exe = "cloudflared.exe" if platform.system() == "Windows" else "cloudflared"
+        cmd = f"{exe} tunnel run --token {settings.cloudflare_tunnel_token}"
+        subprocess.Popen(cmd, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        logger.info("✅ Cloudflare Tunnel 已在后台启动")
+    except Exception as e:
+        logger.error(f"❌ 启动 Cloudflare Tunnel 失败: {e}")
+
+
 app = FastAPI(title="NovelAI Gateway", lifespan=lifespan)
 
 
+# ── 静态资源 ────────────────────────────────────────────────
+
 @app.get("/images/{filename}")
 async def serve_image(filename: str):
+    """提供本地图床的图片访问。"""
     path = settings.image_dir / filename
     if not path.exists():
         raise HTTPException(status_code=404)
@@ -68,6 +75,7 @@ async def serve_image(filename: str):
 # ── 工具函数 ────────────────────────────────────────────────
 
 def _cors_preflight() -> Response:
+    """返回 CORS 预检响应。"""
     return Response(status_code=204, headers=_CORS_HEADERS)
 
 
@@ -85,52 +93,48 @@ def _clean_headers(upstream) -> dict[str, str]:
 
 async def _handle_heavy(request: Request, target_url: str) -> Response:
     """排队 → 转发 → 完整读取 → 冷却 → 释放锁 → 返回。"""
-    
-    # 0. 预检请求直接返回，不参与排队
+
     if request.method == "OPTIONS":
         return _cors_preflight()
 
-    # 1. 排队获取锁
+    # 排队获取锁
     try:
         await gate.__aenter__()
     except asyncio.TimeoutError:
         raise HTTPException(status_code=503, detail="排队超时，请稍后重试。")
 
-    # 2. 转发并读取完整响应
+    # 转发并读取完整响应
     try:
         upstream = await forward(request, target_url)
         await upstream.aread()
-        
+
         ct = upstream.headers.get("content-type", "")
         logger.info(
             f"✅ 完成  status={upstream.status_code}  "
             f"type={ct}  size={len(upstream.content)}B"
         )
 
-        # 记录统计信息
+        # 记录统计信息（仅成功的生成请求）
         if upstream.status_code == 200:
-            # 尝试从请求体中获取宽高
             width, height = 0, 0
             try:
                 body = await request.json()
                 params = body.get("parameters", {})
                 width = params.get("width", 0)
                 height = params.get("height", 0)
-            except:
+            except Exception:
                 pass
             record_generation(upstream.content, target_url, width, height)
 
         headers = _clean_headers(upstream)
-        
-        # 3. 先释放锁（包含冷却），再返回响应
+
+        # 释放锁（包含冷却）
         await gate.__aexit__(None, None, None)
-        
         await upstream.aclose()
 
-        # 额外安全头，防止 IDM 等工具拦截
+        # 安全头，防止 IDM 等工具拦截
         headers["X-Content-Type-Options"] = "nosniff"
 
-        # 如果是 204 No Content，确保不返回任何可能触发下载的头
         if upstream.status_code == 204:
             logger.warning(f"⚠️ 上游返回了 204 No Content: {target_url}")
             return Response(status_code=204, headers=_CORS_HEADERS)
@@ -149,17 +153,17 @@ async def _handle_heavy(request: Request, target_url: str) -> Response:
         raise HTTPException(status_code=502, detail="上游请求失败。")
 
 
-# ── 路由 ────────────────────────────────────────────────────
+# ── OpenAI 兼容路由 ──────────────────────────────────────────
 
 @app.post("/v1/images/generations")
 async def openai_generations(request: Request):
-    """适配 OpenAI DALL-E 格式的接口。"""
+    """OpenAI DALL-E 格式图片生成接口。"""
     return await handle_openai_generations(request)
 
 
 @app.post("/v1/chat/completions")
 async def openai_chat_completions(request: Request):
-    """适配 OpenAI Chat 格式的接口，将对话转为图像生成。"""
+    """OpenAI Chat 格式接口，将对话转为图像生成。"""
     return await handle_openai_chat_completions(request)
 
 
@@ -168,6 +172,8 @@ async def openai_models():
     """返回支持的模型列表。"""
     return await handle_openai_models()
 
+
+# ── NovelAI 代理路由 ─────────────────────────────────────────
 
 @app.api_route(
     "/_api/{path:path}",
