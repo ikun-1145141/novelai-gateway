@@ -1,6 +1,9 @@
 import json
 import os
 import logging
+import struct
+import zipfile
+import io
 from datetime import datetime
 from threading import Lock
 
@@ -18,15 +21,46 @@ if not stats_logger.handlers:
 STATS_JSON = "logs/stats_summary.json"
 _stats_lock = Lock()
 
-def record_generation(size_bytes: int, path: str):
-    """记录生成统计：小于 2MB 为小图，大于等于 2MB 为大图"""
+def _get_png_size(data: bytes) -> tuple[int, int]:
+    """从 PNG 二进制数据中解析宽高"""
+    if len(data) < 24: return 0, 0
+    if data.startswith(b'\x89PNG\r\n\x1a\n'):
+        w, h = struct.unpack('>II', data[16:24])
+        return w, h
+    return 0, 0
+
+def _get_size_from_any(content: bytes) -> tuple[int, int]:
+    """尝试从响应内容（可能是 ZIP 或 PNG）中检测宽高"""
+    if not content: return 0, 0
+    # 1. 尝试当作 PNG 解析
+    w, h = _get_png_size(content)
+    if w > 0: return w, h
+    # 2. 尝试当作 ZIP 解析
+    try:
+        with zipfile.ZipFile(io.BytesIO(content)) as zf:
+            for name in zf.namelist():
+                if name.endswith(".png"):
+                    return _get_png_size(zf.read(name))
+    except:
+        pass
+    return 0, 0
+
+def record_generation(content: bytes, path: str, width: int = 0, height: int = 0):
+    """记录生成统计：根据画幅判断，超过 1024x1024 (1,048,576 像素) 为大图"""
     # 只统计生成图片的接口
     if "/ai/generate-image" not in path:
         return
 
-    is_large = size_bytes >= 2 * 1024 * 1024
+    # 如果没传宽高，尝试从内容中检测
+    if width <= 0 or height <= 0:
+        width, height = _get_size_from_any(content)
+
+    # 按像素数判断（NAI 官方标准：> 1M 像素算大图）
+    is_large = (width * height) > 1024 * 1024
+        
     size_type = "large" if is_large else "small"
     size_label = "大图" if is_large else "小图"
+    size_bytes = len(content)
     
     today = datetime.now().strftime("%Y-%m-%d")
     
@@ -50,7 +84,8 @@ def record_generation(size_bytes: int, path: str):
         
         # 2. 写入日志文件
         current_total = stats_data[today]
-        log_msg = (f"生成确认 | 类型: {size_label} | 大小: {size_bytes/1024/1024:.2f}MB | "
+        dim_str = f"{width}x{height}" if width > 0 else "未知"
+        log_msg = (f"生成确认 | 类型: {size_label} | 画幅: {dim_str} | 大小: {size_bytes/1024/1024:.2f}MB | "
                    f"今日累计: 小图={current_total['small']}, 大图={current_total['large']}")
         stats_logger.info(log_msg)
         

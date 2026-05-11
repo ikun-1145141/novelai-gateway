@@ -109,7 +109,16 @@ async def _handle_heavy(request: Request, target_url: str) -> Response:
 
         # 记录统计信息
         if upstream.status_code == 200:
-            record_generation(len(upstream.content), target_url)
+            # 尝试从请求体中获取宽高
+            width, height = 0, 0
+            try:
+                body = await request.json()
+                params = body.get("parameters", {})
+                width = params.get("width", 0)
+                height = params.get("height", 0)
+            except:
+                pass
+            record_generation(upstream.content, target_url, width, height)
 
         headers = _clean_headers(upstream)
         

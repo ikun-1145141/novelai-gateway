@@ -16,6 +16,7 @@ from fastapi.responses import StreamingResponse
 from .config import settings
 from .forwarder import forward
 from .queue import gate
+from .stats import record_generation
 
 logger = logging.getLogger("gateway")
 
@@ -115,6 +116,9 @@ async def handle_openai_generations(request: Request) -> Response:
         if nai_resp.status_code != 200:
             logger.error(f"NAI Error: {nai_resp.status_code} {nai_resp.text}")
             return Response(content=nai_resp.content, status_code=nai_resp.status_code, media_type="application/json")
+
+        # 记录统计信息
+        record_generation(nai_resp.content, target_url, width, height)
 
         # 4. 解析 ZIP 响应
         image_b64 = ""
@@ -346,6 +350,9 @@ async def handle_openai_chat_completions(request: Request) -> Response:
 
         if nai_resp.status_code != 200:
             return Response(content=nai_resp.content, status_code=nai_resp.status_code, media_type="application/json")
+
+        # 记录统计信息
+        record_generation(nai_resp.content, target_url, width, height)
 
         # 解析图片
         img_data = b""
