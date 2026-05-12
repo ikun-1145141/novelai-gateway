@@ -4,7 +4,7 @@ services:
     container_name: novelai-gateway
     restart: unless-stopped
     ports:
-      - "${PORT:-31555}:31555"
+      - "${PORT:-31555}:7877"
     volumes:
       - ./images:/app/images
     env_file:
