@@ -1,0 +1,14 @@
+services:
+  novelai-gateway:
+    build: .
+    container_name: novelai-gateway
+    restart: unless-stopped
+    ports:
+      - "${PORT:-31555}:31555"
+    volumes:
+      - ./images:/app/images
+    env_file:
+      - .env
+    environment:
+      - HOST=0.0.0.0
+      - PORT=31555
