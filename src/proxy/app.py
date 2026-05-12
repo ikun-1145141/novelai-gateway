@@ -187,11 +187,18 @@ async def proxy_api(request: Request, path: str):
     api_path = f"/{path}" if not path.startswith("/") else path
     target_url = settings.get_upstream_url(api_path)
 
-    if settings.is_heavy(api_path):
-        return await _handle_heavy(request, target_url)
+    try:
+        if settings.is_heavy(api_path):
+            return await _handle_heavy(request, target_url)
 
-    upstream = await forward(request, target_url)
-    return await build_response(request, upstream)
+        upstream = await forward(request, target_url)
+        return await build_response(request, upstream)
+    except Exception as exc:
+        if isinstance(exc, HTTPException):
+            raise
+        logger.error(f"❌ API 请求失败 ({api_path}): {exc}")
+        logger.debug("详细错误堆栈:", exc_info=True)
+        raise HTTPException(status_code=502, detail=f"上游连接失败: {exc}")
 
 
 @app.api_route(
@@ -204,5 +211,12 @@ async def proxy_site(request: Request, path: str):
         return _cors_preflight()
 
     target_url = f"{settings.novelai_base_url}/{path}"
-    upstream = await forward(request, target_url)
-    return await build_response(request, upstream, do_rewrite=True)
+    try:
+        upstream = await forward(request, target_url)
+        return await build_response(request, upstream, do_rewrite=True)
+    except Exception as exc:
+        if isinstance(exc, HTTPException):
+            raise
+        logger.error(f"❌ 站点代理失败 ({path}): {exc}")
+        logger.debug("详细错误堆栈:", exc_info=True)
+        raise HTTPException(status_code=502, detail=f"上游连接失败: {exc}")
